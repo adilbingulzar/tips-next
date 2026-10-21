@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Runs the whole app locally: the Laravel API, a queue worker (emails, SMS) and Next.js.
+#
+#   bin/dev              start in development mode (hot reload)
+#   bin/dev start        build the frontend and start it like production
+#   bin/dev seed         reset the database with demo data, then start in development mode
+#   bin/dev stop         stop everything this script started
+#
+# Ports: API 8000, website 3000. Logs: backend/storage/logs/dev-*.log
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="$ROOT/bin:$PATH"
+LOGS="$ROOT/backend/storage/logs"
+PIDS="$LOGS/dev.pids"
+
+# Use Node from nvm when it is installed (the project needs Node 26).
+if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+  # shellcheck disable=SC1091
+  . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" --no-use >/dev/null
+  nvm use 26 >/dev/null || true
+fi
+
+stop() {
+  if [ -f "$PIDS" ]; then
+    while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDS"
+    rm -f "$PIDS"
+  fi
+  # Anything still holding the ports (for example started by hand).
+  for port in 3000 8000; do
+    pid=$(ss -ltnp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+}
+
+run() { # name, command...
+  local name=$1; shift
+  nohup "$@" > "$LOGS/dev-$name.log" 2>&1 &
+  echo $! >> "$PIDS"
+}
+
+wait_until_up() {
+  for _ in $(seq 1 120); do
+    if curl -s -o /dev/null http://127.0.0.1:8000/up && curl -s -o /dev/null http://127.0.0.1:3000/; then
+      echo "API:     http://127.0.0.1:8000"
+      echo "Website: http://127.0.0.1:3000"
+      echo "Stop with: bin/dev stop"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "The servers did not start. See $LOGS/dev-*.log" >&2
+  return 1
+}
+
+start() { # mode: dev | prod
+  stop
+  mkdir -p "$LOGS"
+  cd "$ROOT/backend"
+  run api php artisan serve --host=127.0.0.1 --port=8000
+  run queue php artisan queue:work --tries=3
+  cd "$ROOT/frontend"
+  if [ "$1" = "prod" ]; then
+    echo "Building the frontend…"
+    npm run build > "$LOGS/dev-build.log" 2>&1 || { echo "Build failed, see $LOGS/dev-build.log" >&2; tail -30 "$LOGS/dev-build.log" >&2; exit 1; }
+    run web npx next start -p 3000 -H 127.0.0.1
+  else
+    run web npx next dev -p 3000 -H 127.0.0.1
+  fi
+  wait_until_up
+}
+
+case "${1:-}" in
+  "") start dev ;;
+  start) start prod ;;
+  seed)
+    (cd "$ROOT/backend" && php artisan migrate:fresh --seed --force)
+    start dev
+    ;;
+  stop) stop; echo "Stopped." ;;
+  *) sed -n '2,9p' "$0"; exit 1 ;;
+esac

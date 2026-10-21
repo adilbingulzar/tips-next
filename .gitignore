@@ -1,0 +1,7 @@
+# backend/ and frontend/ each have their own .gitignore for framework files.
+.env
+*.sql
+.DS_Store
+.idea/
+# Table structure only (no rows), used by the import tests
+!backend/tests/Fixtures/legacy_schema.sql
